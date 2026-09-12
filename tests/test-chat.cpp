@@ -6267,6 +6267,82 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .run();
     }
 
+    // LLM-jp-4.1: GPT-OSS format with a space after every special token and <|end|>-separated parallel calls
+    {
+        auto tst = peg_tester("models/templates/llm-jp-llm-jp-4.1-8b-thinking.jinja", detailed_debug);
+
+        // Final channel as the tokenizer emits it
+        tst.test("<|channel|> final<|message|> Hello, world!\nWhat's up?").expect(message_assist).run();
+
+        // The unspaced GPT-OSS form is still accepted
+        tst.test("<|channel|>final<|message|>Hello, world!\nWhat's up?").expect(message_assist).run();
+
+        // Only the tokenizer's one space is dropped: an intentional leading space in the body survives
+        tst.test("<|channel|> final<|message|>  padded").expect_content(" padded").run();
+
+        // A body starting with a newline keeps the newline
+        tst.test("<|channel|> final<|message|> \nHello").expect_content("\nHello").run();
+
+        // Analysis channel (reasoning) with final channel (content)
+        tst.test(
+               "<|channel|> analysis<|message|> I'm\nthinking<|end|><|start|> assistant<|channel|> final<|message|> Hello, world!\nWhat's "
+               "up?")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .expect(message_assist_thoughts)
+            .run();
+
+        // Analysis channel only (partial)
+        tst.test("<|channel|> analysis<|message|> I'm\nthinking")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .is_partial(true)
+            .expect_reasoning("I'm\nthinking")
+            .run();
+
+        // Tool call with recipient in role header; the constrain type carries the template's space plus the tokenizer's
+        tst.test(
+               "<|channel|> analysis<|message|> I'm\nthinking<|end|>"
+               "<|start|> assistant to=functions.special_function<|channel|> commentary <|constrain|>  json<|message|> {\"arg1\": 1}")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .tools({ special_function_tool })
+            .expect(message_assist_call_thoughts)
+            .run();
+
+        // Tool call with recipient in channel header
+        tst.test("<|channel|> commentary to=functions.special_function<|message|> {\"arg1\": 1}")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .tools({ special_function_tool })
+            .expect(message_assist_call)
+            .run();
+
+        // Parallel tool calls: every call but the last is closed by <|end|>, the last one by <|call|> (end of generation)
+        tst.test(
+               "<|channel|> analysis<|message|> I'm\nthinking<|end|>"
+               "<|start|> assistant to=functions.special_function<|channel|> commentary <|constrain|>  json<|message|> {\"arg1\": 1}<|end|>"
+               "<|start|> assistant to=functions.special_function<|channel|> commentary <|constrain|>  json<|message|> {\"arg1\": 2}")
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .tools({ special_function_tool })
+            .parallel_tool_calls(true)
+            .expect_reasoning("I'm\nthinking")
+            .expect_tool_calls({
+                { "special_function", "{\"arg1\": 1}", {} },
+                { "special_function", "{\"arg1\": 2}", {} },
+            })
+            .run();
+
+        // Structured output
+        tst.test(
+            "<|channel|> analysis<|message|> I need to output the invoice details in JSON<|end|>"
+            "<|start|> assistant<|channel|> final <|constrain|>  json"
+            "<|message|> "
+            R"({"amount": 123.45, "date": "2025-12-03"})"
+            )
+            .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+            .json_schema(invoice_schema)
+            .expect_reasoning("I need to output the invoice details in JSON")
+            .expect_content(R"({"amount": 123.45, "date": "2025-12-03"})")
+            .run();
+    }
+
     {
         auto tst = peg_tester("models/templates/StepFun3.5-Flash.jinja", detailed_debug);
 
